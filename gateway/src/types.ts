@@ -14,6 +14,7 @@ export interface UpstreamContext {
   upstreamUrl: string;
   apiKey: string;
   keyId: string;
+  authHeader: string;  // 'authorization' | 'x-api-key' | 'x-goog-api-key'
 }
 
 export interface CapturedUsage {

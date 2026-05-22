@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import pool from './connection.js';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';

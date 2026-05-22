@@ -11,7 +11,20 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   gemini: 'https://generativelanguage.googleapis.com',
 };
 
+const AUTH_HEADERS: Record<string, string> = {
+  openai: 'authorization',
+  anthropic: 'x-api-key',
+  deepseek: 'authorization',
+  zhipu: 'authorization',
+  qwen: 'authorization',
+  gemini: 'x-goog-api-key',
+};
+
 export function detectProvider(req: FastifyRequest): Provider {
+  // 显式指定（用于多厂商路由或测试）
+  const override = req.headers['x-tokenviz-provider'] as string | undefined;
+  if (override) return override as Provider;
+
   const url = req.url;
   if (url.includes('/v1/messages')) return 'anthropic';
   if (url.includes('/v1beta/')) return 'gemini';
@@ -41,5 +54,6 @@ export async function buildUpstreamContext(
     upstreamUrl,
     apiKey: row.key_value,
     keyId: row.id,
+    authHeader: AUTH_HEADERS[provider],
   };
 }
