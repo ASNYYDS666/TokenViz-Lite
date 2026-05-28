@@ -20,15 +20,55 @@ const AUTH_HEADERS: Record<string, string> = {
   gemini: 'x-goog-api-key',
 };
 
-export function detectProvider(req: FastifyRequest): Provider {
-  // 显式指定（用于多厂商路由或测试）
-  const override = req.headers['x-tokenviz-provider'] as string | undefined;
-  if (override) return override as Provider;
+// model → provider cache, refreshed periodically
+const modelProviderMap = new Map<string, Provider>();
 
-  const url = req.url;
+export async function refreshModelProviderMap(): Promise<void> {
+  const result = await pool.query(
+    `SELECT model, provider FROM model_pricing WHERE is_active = true`,
+  );
+  modelProviderMap.clear();
+  for (const row of result.rows) {
+    modelProviderMap.set(row.model, row.provider as Provider);
+  }
+}
+
+// Initialize on load
+refreshModelProviderMap().catch(() => {});
+// Refresh every 5 minutes
+setInterval(() => refreshModelProviderMap().catch(() => {}), 5 * 60_000);
+
+function detectProviderByUrl(url: string): Provider {
   if (url.includes('/v1/messages')) return 'anthropic';
   if (url.includes('/v1beta/')) return 'gemini';
   return 'openai';
+}
+
+function detectProviderByModel(model: unknown, urlProvider: Provider): Provider {
+  // Model-based routing only for OpenAI-compatible URLs.
+  // Anthropic and Gemini have unique URL patterns — keep them as-is.
+  if (urlProvider !== 'openai') return urlProvider;
+  if (typeof model !== 'string' || !model) return urlProvider;
+
+  // Check model→provider map from model_pricing table
+  const mapped = modelProviderMap.get(model);
+  if (mapped) return mapped;
+
+  // Heuristic: model name prefixes
+  const m = model.toLowerCase();
+  if (m.startsWith('deepseek')) return 'deepseek';
+  if (m.includes('glm')) return 'zhipu';
+  if (m.startsWith('qwen')) return 'qwen';
+
+  return urlProvider;
+}
+
+export function detectProvider(req: FastifyRequest, model?: unknown): Provider {
+  const override = req.headers['x-tokenviz-provider'] as string | undefined;
+  if (override) return override as Provider;
+
+  const urlProvider = detectProviderByUrl(req.url);
+  return detectProviderByModel(model, urlProvider);
 }
 
 export async function buildUpstreamContext(

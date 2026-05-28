@@ -23,11 +23,9 @@ function buildCleanHeaders(
       clean[key] = Array.isArray(value) ? value[0] : value;
     }
   }
-  // 移除客户端可能带的旧认证 header
   delete clean['authorization'];
   delete clean['x-api-key'];
   delete clean['x-goog-api-key'];
-  // 设置正确的认证 header
   if (ctx.authHeader === 'authorization') {
     clean['authorization'] = `Bearer ${ctx.apiKey}`;
   } else {
@@ -37,52 +35,47 @@ function buildCleanHeaders(
   return clean;
 }
 
-async function fetchUpstream(
-  ctx: { upstreamUrl: string },
-  cleanHeaders: Record<string, string>,
-  request: FastifyRequest,
-) {
-  return fetch(ctx.upstreamUrl, {
-    method: request.method,
-    headers: cleanHeaders,
-    body: request.method !== 'GET' ? JSON.stringify(request.body) : undefined,
-  });
+export async function startProxy(port: number = 3100) {
+  await app.listen({ port, host: '0.0.0.0' });
+  console.log(`[proxy] listening on :${port}`);
 }
+
+export default app;
 
 app.route({
   method: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   url: '/v1/*',
   handler: async (request, reply) => {
     const startTime = Date.now();
-    const provider = detectProvider(request);
+    const body = (request.body || {}) as Record<string, unknown>;
+    const provider = detectProvider(request, body.model);
     const ctx = await buildUpstreamContext(provider, request.url);
     const cleanHeaders = buildCleanHeaders(request, ctx);
 
     // ─── 流式请求 ───
     if (isStreamingRequest(request)) {
-      const body = { ...(request.body as Record<string, unknown>) };
-      // 为 OpenAI 兼容厂商注入 stream_options，保证流末尾包含 usage
-      if (provider !== 'anthropic' && provider !== 'gemini' && !body.stream_options) {
-        body.stream_options = { include_usage: true };
+      const streamingBody = { ...body };
+      if (provider !== 'anthropic' && provider !== 'gemini' && !streamingBody.stream_options) {
+        streamingBody.stream_options = { include_usage: true };
       }
 
       const upstream = await fetch(ctx.upstreamUrl, {
         method: 'POST',
         headers: cleanHeaders,
-        body: JSON.stringify(body),
+        body: JSON.stringify(streamingBody),
       });
 
       await handleStreaming(
         upstream,
         reply.raw,
         provider,
-        (body.model as string) || (request.body as Record<string, unknown>)?.model as string || '',
+        (streamingBody.model as string) || '',
         startTime,
         (usage, ttft) => {
           recordUsage({
             request_id: generateRequestId(),
             provider,
-            model: (body.model as string) || '',
+            model: (streamingBody.model as string) || '',
             is_streaming: true,
             status_code: upstream.status,
             latency_ms: Date.now() - startTime,
@@ -98,9 +91,12 @@ app.route({
     }
 
     // ─── 非流式请求 ───
-    const upstream = await fetchUpstream(ctx, cleanHeaders, request);
+    const upstream = await fetch(ctx.upstreamUrl, {
+      method: request.method,
+      headers: cleanHeaders,
+      body: request.method !== 'GET' ? JSON.stringify(body) : undefined,
+    });
 
-    // 透传响应头
     for (const [key, value] of upstream.headers.entries()) {
       if (!HEADERS_TO_STRIP.includes(key.toLowerCase())) {
         reply.header(key, value);
@@ -108,13 +104,12 @@ app.route({
     }
     reply.status(upstream.status);
 
-    // 非成功状态码 → 不提取 usage，原样返回
     if (!upstream.ok) {
       app.log.info({ provider, status: upstream.status }, 'upstream error');
       recordUsage({
         request_id: generateRequestId(),
         provider,
-        model: (request.body as Record<string, unknown>)?.model as string || '',
+        model: (body.model as string) || '',
         is_streaming: false,
         status_code: upstream.status,
         latency_ms: Date.now() - startTime,
@@ -128,15 +123,12 @@ app.route({
     }
 
     const responseBody = await upstream.json() as Record<string, unknown>;
-
-    // 提取 usage
     const usage = extractUsageByProvider(responseBody, provider);
 
-    // 异步写库（不 await，不阻塞响应）
     recordUsage({
       request_id: generateRequestId(),
       provider,
-      model: (responseBody.model as string) || (request.body as Record<string, unknown>)?.model as string || '',
+      model: (responseBody.model as string) || (body.model as string) || '',
       is_streaming: false,
       status_code: upstream.status,
       latency_ms: Date.now() - startTime,
@@ -150,10 +142,3 @@ app.route({
     return responseBody;
   },
 });
-
-export async function startProxy(port: number = 3100) {
-  await app.listen({ port, host: '0.0.0.0' });
-  console.log(`[proxy] listening on :${port}`);
-}
-
-export default app;
